@@ -549,8 +549,16 @@ template<> inline std::string        str_to<std::string>       (const std::strin
 template<> inline int                str_to<int>               (const std::string& s) { return std::stoi(s); }
 template<> inline long               str_to<long>              (const std::string& s) { return std::stol(s); }
 template<> inline long long          str_to<long long>         (const std::string& s) { return std::stoll(s); }
-template<> inline unsigned long      str_to<unsigned long>     (const std::string& s) { return std::stoul(s); }
-template<> inline unsigned long long str_to<unsigned long long>(const std::string& s) { return std::stoull(s); }
+// std::stoul/stoull accept a leading minus sign and silently wrap ("-1" -> ULONG_MAX), so unsigned
+// parses reject a minus sign (the narrower unsigned types below already throw via range checking)
+namespace cppstr_detail {
+	inline void reject_negative(const std::string& s, const char* name) {
+		const size_t k = s.find_first_not_of(" \t\n\r\f\v");
+		if(k != std::string::npos and s[k] == '-') throw std::out_of_range(std::string("str_to<") + name + "> of a negative number: " + s);
+	}
+}
+template<> inline unsigned long      str_to<unsigned long>     (const std::string& s) { cppstr_detail::reject_negative(s, "unsigned long");      return std::stoul(s); }
+template<> inline unsigned long long str_to<unsigned long long>(const std::string& s) { cppstr_detail::reject_negative(s, "unsigned long long"); return std::stoull(s); }
 template<> inline double             str_to<double>            (const std::string& s) { return std::stod(s); }
 template<> inline float              str_to<float>             (const std::string& s) { return std::stof(s); }
 template<> inline long double        str_to<long double>       (const std::string& s) { return std::stold(s); }
