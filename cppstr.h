@@ -23,6 +23,7 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <source_location>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -30,6 +31,7 @@
 #include <system_error>
 #include <tuple>
 #include <type_traits>
+#include <typeinfo>
 #include <utility>
 #include <vector>
 
@@ -514,6 +516,144 @@ std::string str(const std::string& _sep, const Args&... args){
 	((out += (first ? std::string() : _sep), out += str(args), first = false), ...);
 	return out;
 }
+
+
+//*******************************************************************************************
+// Type names: type_str<T>()
+//*******************************************************************************************
+//
+// type_str<T>() names a TYPE (str() names a VALUE), using the same vocabulary as str():
+//     type_str<std::map<std::string, std::vector<double>>>() == "map<string,vector<double>>"
+//     type_str<const int* const&>()                          == "const int* const&"
+// Fundamental types, std::string, and the containers str() supports (with their default
+// allocator/comparator) get these short, compiler-independent names, nested arbitrarily, and
+// const/volatile/&/&&/pointers/arrays are kept (unlike typeid, which drops top-level cv and refs).
+//
+// Everything else -- user types, other std types, customized containers, and pointers/references
+// to arrays or functions (e.g. "int (&)[2]") -- falls back to the compiler's own spelling, which is
+// COMPILER- AND STDLIB-SPECIFIC (e.g. "std::__cxx11::list<int>" on GCC vs "std::list<int>" on Clang).
+// That fallback is parsed from std::source_location on GCC/Clang; on other compilers (e.g. MSVC,
+// untested) it uses typeid(T).name(), which drops cv/ref qualifiers. Do not rely on fallback names
+// being stable across machines.
+//
+// Typedefs are not preserved: type_str<int64_t>() is "long" on Linux but "long long" on Windows.
+
+template<typename T> std::string type_str();
+
+namespace cppstr_detail {
+
+	// The compiler's own spelling of T, taken from this function's signature string
+	// (GCC: "... [with T = X; ...]", Clang: "... [T = X]").
+	template<typename T>
+	std::string compiler_type_name() {
+		const std::string_view f = std::source_location::current().function_name();
+		const size_t key = f.find("T = ");
+		if(key != std::string_view::npos) {
+			const size_t b = key + 4;
+			size_t e = f.find("; ", b);
+			if(e == std::string_view::npos) e = f.rfind(']');
+			if(e != std::string_view::npos && e > b) return std::string(f.substr(b, e - b));
+		}
+		// unrecognized format (not GCC/Clang): last resort
+#if defined(__cpp_rtti) || defined(__GXX_RTTI) || defined(_CPPRTTI)
+		return typeid(T).name();  // may be mangled, and drops cv/ref qualifiers
+#else
+		return std::string(f);    // no RTTI: the whole, unparsed signature string
+#endif
+	}
+
+	// "A,B,C" for type_str<A>(), type_str<B>(), type_str<C>()
+	template<typename... Ts>
+	std::string type_list() {
+		std::string out;
+		bool first = true;
+		((out += (first ? "" : ","), out += type_str<Ts>(), first = false), ...);
+		return out;
+	}
+
+	// "[2][3]" for T = X[2][3]  ("[]" for an unbounded extent), outermost first
+	template<typename T>
+	std::string array_extents() {
+		if constexpr (std::is_bounded_array_v<T>)        return "[" + std::to_string(std::extent_v<T>) + "]" + array_extents<std::remove_extent_t<T>>();
+		else if constexpr (std::is_unbounded_array_v<T>) return "[]" + array_extents<std::remove_extent_t<T>>();
+		else                                             return "";
+	}
+
+	// Primary template: a type we don't have a name for
+	template<typename T> struct type_name { static std::string get() { return compiler_type_name<T>(); } };
+
+#define CPPSTR_TYPE_NAME(T, NAME) template<> struct type_name<T> { static std::string get() { return NAME; } };
+	CPPSTR_TYPE_NAME(void,               "void")
+	CPPSTR_TYPE_NAME(bool,               "bool")
+	CPPSTR_TYPE_NAME(char,               "char")
+	CPPSTR_TYPE_NAME(signed char,        "signed char")
+	CPPSTR_TYPE_NAME(unsigned char,      "unsigned char")
+	CPPSTR_TYPE_NAME(short,              "short")
+	CPPSTR_TYPE_NAME(unsigned short,     "unsigned short")
+	CPPSTR_TYPE_NAME(int,                "int")
+	CPPSTR_TYPE_NAME(unsigned int,       "unsigned int")
+	CPPSTR_TYPE_NAME(long,               "long")
+	CPPSTR_TYPE_NAME(unsigned long,      "unsigned long")
+	CPPSTR_TYPE_NAME(long long,          "long long")
+	CPPSTR_TYPE_NAME(unsigned long long, "unsigned long long")
+	CPPSTR_TYPE_NAME(float,              "float")
+	CPPSTR_TYPE_NAME(double,             "double")
+	CPPSTR_TYPE_NAME(long double,        "long double")
+	CPPSTR_TYPE_NAME(std::nullptr_t,     "nullptr_t")
+	CPPSTR_TYPE_NAME(std::string,        "string")
+	CPPSTR_TYPE_NAME(std::string_view,   "string_view")
+#undef CPPSTR_TYPE_NAME
+
+	// Containers: only these exact forms (default allocator/comparator) get the short name;
+	// anything customized falls through to the primary template, so we never print a misleading name.
+	template<typename T>             struct type_name<std::vector<T>>     { static std::string get() { return "vector<"   + type_str<T>() + ">"; } };
+	template<typename T>             struct type_name<std::deque<T>>      { static std::string get() { return "deque<"    + type_str<T>() + ">"; } };
+	template<typename T>             struct type_name<std::set<T>>        { static std::string get() { return "set<"      + type_str<T>() + ">"; } };
+	template<typename T>             struct type_name<std::multiset<T>>   { static std::string get() { return "multiset<" + type_str<T>() + ">"; } };
+	template<typename K, typename V> struct type_name<std::map<K,V>>      { static std::string get() { return "map<"      + type_list<K,V>() + ">"; } };
+	template<typename A, typename B> struct type_name<std::pair<A,B>>     { static std::string get() { return "pair<"     + type_list<A,B>() + ">"; } };
+	template<typename... Ts>         struct type_name<std::tuple<Ts...>>  { static std::string get() { return "tuple<"    + type_list<Ts...>() + ">"; } };
+	template<typename T, size_t N>   struct type_name<std::array<T,N>>    { static std::string get() { return "array<"    + type_str<T>() + "," + std::to_string(N) + ">"; } };
+	template<typename T>             struct type_name<std::atomic<T>>     { static std::string get() { return "atomic<"   + type_str<T>() + ">"; } };
+}
+
+/**
+ * @brief The name of the type T (see the section comment above for the exact guarantees).
+ */
+template<typename T>
+std::string type_str() {
+	using Target = std::remove_cv_t<std::remove_pointer_t<std::remove_reference_t<T>>>;
+
+	// pointers/references to arrays or functions need declarator syntax (int (&)[2], void (*)(int)),
+	// which simple prefix/suffix composition below would get wrong -- let the compiler spell them
+	if constexpr ((std::is_reference_v<T> || std::is_pointer_v<std::remove_cv_t<T>>) &&
+	              (std::is_array_v<Target> || std::is_function_v<Target>)) {
+		return cppstr_detail::compiler_type_name<T>();
+	}
+	else if constexpr (std::is_lvalue_reference_v<T>) return type_str<std::remove_reference_t<T>>() + "&";
+	else if constexpr (std::is_rvalue_reference_v<T>) return type_str<std::remove_reference_t<T>>() + "&&";
+	// arrays before cv: std::is_const_v<const int[3]> is true, but the const belongs to the element.
+	// Extents are written outermost first: int[2][3] is 2 arrays of 3 ints.
+	else if constexpr (std::is_array_v<T>)            return type_str<std::remove_all_extents_t<T>>() + cppstr_detail::array_extents<T>();
+	else if constexpr (std::is_const_v<T> || std::is_volatile_v<T>) {
+		const std::string cv = std::string(std::is_const_v<T> ? "const" : "") +
+		                       (std::is_const_v<T> && std::is_volatile_v<T> ? " " : "") +
+		                       (std::is_volatile_v<T> ? "volatile" : "");
+		using U = std::remove_cv_t<T>;
+		// a cv-qualified POINTER must be written after the '*' (int* const); prefixing would mean const int*
+		if constexpr (std::is_pointer_v<U>) return type_str<U>() + " " + cv;
+		else                                return cv + " " + type_str<U>();
+	}
+	else if constexpr (std::is_pointer_v<T>)          return type_str<std::remove_pointer_t<T>>() + "*";
+	else                                              return cppstr_detail::type_name<T>::get();
+}
+
+/**
+ * @brief The name of the type of x. Since x binds to const T&, top-level const is not reported:
+ *        for `const int a`, type_str(a) == "int". Use type_str<decltype(a)>() to keep it.
+ */
+template<typename T>
+std::string type_str(const T&) { return type_str<T>(); }
 
 
 //*******************************************************************************************

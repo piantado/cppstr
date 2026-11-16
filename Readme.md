@@ -33,6 +33,23 @@ A number of functions to make C++ friendlier at printing and string conversion. 
 Number parsing uses `std::stoi`/`std::stod` etc., so it is lenient: leading whitespace is skipped,
 trailing junk is ignored (`str_to<int>("3.7") == 3`), and parsing depends on the C locale.
 
+## Type names
+
+`type_str<T>()` names a *type* (whereas `str(x)` names a *value*), using the same vocabulary as `str`:
+
+    type_str<std::map<std::string, std::vector<double>>>()  // "map<string,vector<double>>"
+    type_str<const int* const&>()                           // "const int* const&"
+    type_str<int[2][3]>()                                   // "int[2][3]"
+    type_str(x)                                             // name of x's type, without top-level const
+
+Fundamental types, `std::string`, and the containers above (with default allocators/comparators)
+get short names that are the same on every compiler; `const`, `volatile`, `&`, `&&`, pointers and
+arrays are kept. Anything else (user types, other std types, customized containers, pointers or
+references to arrays/functions) falls back to the compiler's own spelling, which differs between
+compilers (e.g. `std::__cxx11::list<int>` on GCC vs `std::list<int>` on Clang). Typedefs are not
+preserved (`int64_t` is `long` on Linux, `long long` on Windows). Tested on GCC and Clang; on
+other compilers the fallback uses `typeid`, which drops cv/ref qualifiers.
+
 ## Tests
 
     cd tests && g++ -std=c++20 -g -Wall -Wextra -fsanitize=address,undefined -I.. test_cppstr.cpp second_tu.cpp -o test_cppstr && ./test_cppstr
