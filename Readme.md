@@ -48,7 +48,13 @@ arrays are kept. Anything else (user types, other std types, customized containe
 references to arrays/functions) falls back to the compiler's own spelling, which differs between
 compilers (e.g. `std::__cxx11::list<int>` on GCC vs `std::list<int>` on Clang). Typedefs are not
 preserved (`int64_t` is `long` on Linux, `long long` on Windows). Tested on GCC and Clang; on
-other compilers the fallback uses `typeid`, which drops cv/ref qualifiers.
+other compilers (e.g. MSVC, untested) the fallback returns the whole, unparsed function signature.
+
+Everything is `constexpr` (given a standard library with constexpr `std::string`), so
+`static_assert(type_str<std::vector<int>>() == "vector<int>")` works. To keep a name as a
+compile-time constant, use `type_str_v<T>`, a `std::string_view` into static storage:
+
+    constexpr std::string_view n = type_str_v<std::map<int,double>>;  // "map<int,double>"
 
 ## Tests
 

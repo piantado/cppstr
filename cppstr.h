@@ -31,7 +31,6 @@
 #include <system_error>
 #include <tuple>
 #include <type_traits>
-#include <typeinfo>
 #include <utility>
 #include <vector>
 
@@ -519,7 +518,7 @@ std::string str(const std::string& _sep, const Args&... args){
 
 
 //*******************************************************************************************
-// Type names: type_str<T>()
+// Type names: type_str<T>() and type_str_v<T>
 //*******************************************************************************************
 //
 // type_str<T>() names a TYPE (str() names a VALUE), using the same vocabulary as str():
@@ -533,19 +532,48 @@ std::string str(const std::string& _sep, const Args&... args){
 // to arrays or functions (e.g. "int (&)[2]") -- falls back to the compiler's own spelling, which is
 // COMPILER- AND STDLIB-SPECIFIC (e.g. "std::__cxx11::list<int>" on GCC vs "std::list<int>" on Clang).
 // That fallback is parsed from std::source_location on GCC/Clang; on other compilers (e.g. MSVC,
-// untested) it uses typeid(T).name(), which drops cv/ref qualifiers. Do not rely on fallback names
-// being stable across machines.
+// untested) the parse fails and the whole, unparsed signature string is returned instead. Do not
+// rely on fallback names being stable across machines.
 //
 // Typedefs are not preserved: type_str<int64_t>() is "long" on Linux but "long long" on Windows.
+//
+// Compile time: everything here is constexpr, so e.g.
+//     static_assert(type_str<std::vector<int>>() == "vector<int>");
+// works. The std::string that type_str<T>() returns cannot outlive constant evaluation (C++20
+// forbids heap memory escaping it), so to KEEP a name at compile time use type_str_v<T>, a
+// std::string_view into static storage:
+//     constexpr std::string_view n = type_str_v<std::map<int,double>>;  // "map<int,double>"
 
-template<typename T> std::string type_str();
+// constexpr std::string needs library support (libstdc++ 12+, libc++ 15+, MSVC STL 19.29+). Without it,
+// everything below still works at run time, and only type_str_v<T> is unavailable.
+#ifndef CPPSTR_HAS_CONSTEXPR_STRING
+	#if defined(__cpp_lib_constexpr_string) && __cpp_lib_constexpr_string >= 201907L
+		#define CPPSTR_HAS_CONSTEXPR_STRING 1
+	#else
+		#define CPPSTR_HAS_CONSTEXPR_STRING 0
+	#endif
+#endif
+#if CPPSTR_HAS_CONSTEXPR_STRING
+	#define CPPSTR_CONSTEXPR_STRING constexpr
+#else
+	#define CPPSTR_CONSTEXPR_STRING
+#endif
+
+template<typename T> CPPSTR_CONSTEXPR_STRING std::string type_str();
 
 namespace cppstr_detail {
 
+	// Decimal representation of n (std::to_string is not constexpr)
+	inline CPPSTR_CONSTEXPR_STRING std::string uint_to_string(size_t n) { // inline: needed if not constexpr
+		std::string out;
+		do { out.insert(out.begin(), char('0' + n % 10)); n /= 10; } while(n != 0);
+		return out;
+	}
+
 	// The compiler's own spelling of T, taken from this function's signature string
-	// (GCC: "... [with T = X; ...]", Clang: "... [T = X]").
+	// (GCC: "... [with T = X; ...]", Clang: "... [T = X]"). Any other format: the whole signature.
 	template<typename T>
-	std::string compiler_type_name() {
+	CPPSTR_CONSTEXPR_STRING std::string compiler_type_name() {
 		const std::string_view f = std::source_location::current().function_name();
 		const size_t key = f.find("T = ");
 		if(key != std::string_view::npos) {
@@ -554,17 +582,12 @@ namespace cppstr_detail {
 			if(e == std::string_view::npos) e = f.rfind(']');
 			if(e != std::string_view::npos && e > b) return std::string(f.substr(b, e - b));
 		}
-		// unrecognized format (not GCC/Clang): last resort
-#if defined(__cpp_rtti) || defined(__GXX_RTTI) || defined(_CPPRTTI)
-		return typeid(T).name();  // may be mangled, and drops cv/ref qualifiers
-#else
-		return std::string(f);    // no RTTI: the whole, unparsed signature string
-#endif
+		return std::string(f);
 	}
 
 	// "A,B,C" for type_str<A>(), type_str<B>(), type_str<C>()
 	template<typename... Ts>
-	std::string type_list() {
+	CPPSTR_CONSTEXPR_STRING std::string type_list() {
 		std::string out;
 		bool first = true;
 		((out += (first ? "" : ","), out += type_str<Ts>(), first = false), ...);
@@ -573,16 +596,16 @@ namespace cppstr_detail {
 
 	// "[2][3]" for T = X[2][3]  ("[]" for an unbounded extent), outermost first
 	template<typename T>
-	std::string array_extents() {
-		if constexpr (std::is_bounded_array_v<T>)        return "[" + std::to_string(std::extent_v<T>) + "]" + array_extents<std::remove_extent_t<T>>();
+	CPPSTR_CONSTEXPR_STRING std::string array_extents() {
+		if constexpr (std::is_bounded_array_v<T>)        return "[" + uint_to_string(std::extent_v<T>) + "]" + array_extents<std::remove_extent_t<T>>();
 		else if constexpr (std::is_unbounded_array_v<T>) return "[]" + array_extents<std::remove_extent_t<T>>();
 		else                                             return "";
 	}
 
 	// Primary template: a type we don't have a name for
-	template<typename T> struct type_name { static std::string get() { return compiler_type_name<T>(); } };
+	template<typename T> struct type_name { static CPPSTR_CONSTEXPR_STRING std::string get() { return compiler_type_name<T>(); } };
 
-#define CPPSTR_TYPE_NAME(T, NAME) template<> struct type_name<T> { static std::string get() { return NAME; } };
+#define CPPSTR_TYPE_NAME(T, NAME) template<> struct type_name<T> { static CPPSTR_CONSTEXPR_STRING std::string get() { return NAME; } };
 	CPPSTR_TYPE_NAME(void,               "void")
 	CPPSTR_TYPE_NAME(bool,               "bool")
 	CPPSTR_TYPE_NAME(char,               "char")
@@ -606,22 +629,22 @@ namespace cppstr_detail {
 
 	// Containers: only these exact forms (default allocator/comparator) get the short name;
 	// anything customized falls through to the primary template, so we never print a misleading name.
-	template<typename T>             struct type_name<std::vector<T>>     { static std::string get() { return "vector<"   + type_str<T>() + ">"; } };
-	template<typename T>             struct type_name<std::deque<T>>      { static std::string get() { return "deque<"    + type_str<T>() + ">"; } };
-	template<typename T>             struct type_name<std::set<T>>        { static std::string get() { return "set<"      + type_str<T>() + ">"; } };
-	template<typename T>             struct type_name<std::multiset<T>>   { static std::string get() { return "multiset<" + type_str<T>() + ">"; } };
-	template<typename K, typename V> struct type_name<std::map<K,V>>      { static std::string get() { return "map<"      + type_list<K,V>() + ">"; } };
-	template<typename A, typename B> struct type_name<std::pair<A,B>>     { static std::string get() { return "pair<"     + type_list<A,B>() + ">"; } };
-	template<typename... Ts>         struct type_name<std::tuple<Ts...>>  { static std::string get() { return "tuple<"    + type_list<Ts...>() + ">"; } };
-	template<typename T, size_t N>   struct type_name<std::array<T,N>>    { static std::string get() { return "array<"    + type_str<T>() + "," + std::to_string(N) + ">"; } };
-	template<typename T>             struct type_name<std::atomic<T>>     { static std::string get() { return "atomic<"   + type_str<T>() + ">"; } };
+	template<typename T>             struct type_name<std::vector<T>>     { static CPPSTR_CONSTEXPR_STRING std::string get() { return "vector<"   + type_str<T>() + ">"; } };
+	template<typename T>             struct type_name<std::deque<T>>      { static CPPSTR_CONSTEXPR_STRING std::string get() { return "deque<"    + type_str<T>() + ">"; } };
+	template<typename T>             struct type_name<std::set<T>>        { static CPPSTR_CONSTEXPR_STRING std::string get() { return "set<"      + type_str<T>() + ">"; } };
+	template<typename T>             struct type_name<std::multiset<T>>   { static CPPSTR_CONSTEXPR_STRING std::string get() { return "multiset<" + type_str<T>() + ">"; } };
+	template<typename K, typename V> struct type_name<std::map<K,V>>      { static CPPSTR_CONSTEXPR_STRING std::string get() { return "map<"      + type_list<K,V>() + ">"; } };
+	template<typename A, typename B> struct type_name<std::pair<A,B>>     { static CPPSTR_CONSTEXPR_STRING std::string get() { return "pair<"     + type_list<A,B>() + ">"; } };
+	template<typename... Ts>         struct type_name<std::tuple<Ts...>>  { static CPPSTR_CONSTEXPR_STRING std::string get() { return "tuple<"    + type_list<Ts...>() + ">"; } };
+	template<typename T, size_t N>   struct type_name<std::array<T,N>>    { static CPPSTR_CONSTEXPR_STRING std::string get() { return "array<"    + type_str<T>() + "," + uint_to_string(N) + ">"; } };
+	template<typename T>             struct type_name<std::atomic<T>>     { static CPPSTR_CONSTEXPR_STRING std::string get() { return "atomic<"   + type_str<T>() + ">"; } };
 }
 
 /**
  * @brief The name of the type T (see the section comment above for the exact guarantees).
  */
 template<typename T>
-std::string type_str() {
+CPPSTR_CONSTEXPR_STRING std::string type_str() {
 	using Target = std::remove_cv_t<std::remove_pointer_t<std::remove_reference_t<T>>>;
 
 	// pointers/references to arrays or functions need declarator syntax (int (&)[2], void (*)(int)),
@@ -653,7 +676,31 @@ std::string type_str() {
  *        for `const int a`, type_str(a) == "int". Use type_str<decltype(a)>() to keep it.
  */
 template<typename T>
-std::string type_str(const T&) { return type_str<T>(); }
+CPPSTR_CONSTEXPR_STRING std::string type_str(const T&) { return type_str<T>(); }
+
+#if CPPSTR_HAS_CONSTEXPR_STRING
+namespace cppstr_detail {
+	// type_str<T>() copied into a null-terminated array with static storage duration
+	template<typename T>
+	struct type_str_storage {
+		static constexpr size_t size = type_str<T>().size();
+		static constexpr std::array<char, size + 1> value = [] {
+			std::array<char, size + 1> a{};          // zero-filled, so a[size] == '\0'
+			const std::string s = type_str<T>();
+			for(size_t i = 0; i < size; i++) a[i] = s[i];
+			return a;
+		}();
+	};
+}
+
+/**
+ * @brief type_str<T>() as a compile-time constant std::string_view (into static storage, so it never
+ *        dangles; .data() is also null-terminated). Usable in constexpr variables and template arguments.
+ */
+template<typename T>
+inline constexpr std::string_view type_str_v{cppstr_detail::type_str_storage<T>::value.data(),
+                                             cppstr_detail::type_str_storage<T>::size};
+#endif
 
 
 //*******************************************************************************************
